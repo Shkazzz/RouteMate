@@ -16,7 +16,7 @@ jobs:
           channel: stable
           cache: true
       - name: Generate Android scaffolding
-        run: flutter create . --project-name routemate --org app.routemate --platforms android
+        run: flutter create . --project-name routemate --org app.routemate --platforms android,web
       - name: Enable INTERNET permission in main AndroidManifest
         run: |
           python3 - <<'PY'
@@ -36,7 +36,15 @@ jobs:
           fi
       - run: flutter pub get
       - run: flutter test
+      - name: Validate Flutter Web build
+        run: flutter build web --release
       - run: flutter build apk --debug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RouteMate-Web
+          path: build/web/
+          if-no-files-found: error
+          retention-days: 14
       - uses: actions/upload-artifact@v4
         with:
           name: RouteMate-debug-APK
