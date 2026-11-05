@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 import 'package:http/http.dart' as http;
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:latlong2/latlong.dart';
 import '../models/models.dart';
 
@@ -20,16 +21,19 @@ class OsmServices {
     'User-Agent': 'RouteMateMVP/0.2 (https://github.com/Shkazzz/RouteMate)',
     'Accept': 'application/json',
   };
+  // Browsers cannot set User-Agent and adding custom headers can trigger
+  // a CORS preflight rejected by public OSM endpoints.
+  Map<String, String> get _requestHeaders => kIsWeb ? const {} : _headers;
   DateTime _lastGeocode = DateTime.fromMillisecondsSinceEpoch(0);
 
   Future<dynamic> _request(Uri uri, {String? postBody, Duration timeout = const Duration(seconds: 20)}) async {
     try {
       final http.Response response;
       if (postBody == null) {
-        response = await _client.get(uri, headers: _headers).timeout(timeout);
+        response = await _client.get(uri, headers: _requestHeaders).timeout(timeout);
       } else {
         response = await _client.post(uri,
-          headers: {..._headers, 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'},
+          headers: {..._requestHeaders, 'Content-Type': 'application/x-www-form-urlencoded'},
           body: {'data': postBody}).timeout(timeout);
       }
       if (response.statusCode == 429) throw ApiException('Сервис ограничил частоту запросов (429). Повторите позже.');
@@ -99,7 +103,10 @@ class OsmServices {
     var successfulBatches = 0;
     Object? lastError;
 
-    // Small queries and failover. Partial results are acceptable in MVP.
+    // Overpass POST on public endpoints may be blocked by browser CORS.
+    // On Flutter Web use Wikimedia Geosearch as the primary catalog.
+    // Native Android/iOS can still use Overpass and then Wikipedia fallback.
+    if (!kIsWeb) {
     for (var offset = 0; offset < samples.length; offset += 3) {
       final batch = samples.skip(offset).take(3);
       final clauses = <String>[];
@@ -138,6 +145,7 @@ class OsmServices {
           distanceKm: km, score: scorePoi(tags, profile, km), visitMinutes: visitDuration(category)));
       }
     }
+    }
     // Wikipedia geosearch is an independent POI fallback, not an AI model.
     // It returns real geotagged articles even when public Overpass gives HTTP 502.
     if (collected.length < 12) {
@@ -150,6 +158,7 @@ class OsmServices {
             'gsradius': (profile.detourKm * 1000).clamp(1000, 10000).toString(),
             'gslimit': '20',
             'format': 'json',
+            'origin': '*', // Required by MediaWiki for cross-origin browser fetch.
           }), timeout: const Duration(seconds: 8));
           final found = ((data as Map)['query'] as Map?)?['geosearch'] as List? ?? [];
           for (final entry in found) {
@@ -174,7 +183,9 @@ class OsmServices {
     }
     collected.sort((a, b) => b.score.compareTo(a.score));
     if (collected.isEmpty && successfulBatches == 0) {
-      throw ApiException('Сервисы поиска мест не ответили (Overpass и Wikipedia). Маршрут остаётся на карте. ${lastError ?? ''}');
+      throw ApiException(kIsWeb
+        ? 'Wikipedia Geosearch недоступна из браузера. Проверьте блокировщики и доступ к ru.wikipedia.org. Маршрут остаётся на карте. ${lastError ?? ''}'
+        : 'Сервисы поиска мест не ответили (Overpass и Wikipedia). Маршрут остаётся на карте. ${lastError ?? ''}');
     }
     return collected.take(40).toList();
   }
