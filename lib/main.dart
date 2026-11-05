@@ -8,6 +8,7 @@ import 'models/models.dart';
 import 'services/osm_services.dart';
 import 'services/ai_recommendations.dart';
 import 'services/weather_service.dart';
+import 'services/poi_cache.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -38,6 +39,7 @@ class _RouteMateHomeState extends State<RouteMateHome> {
   final api = OsmServices();
   final ai = AiRecommendations();
   final weatherService = WeatherService();
+  final poiCache = PoiCache();
   final aiKeyController = TextEditingController();
   final mapController = MapController();
   final startController = TextEditingController(text: 'Москва');
@@ -148,15 +150,35 @@ class _RouteMateHomeState extends State<RouteMateHome> {
 
   Future<void> findPlaces() async {
     if (original == null) return;
+    final cacheKey = '${start?.position.latitude.toStringAsFixed(3) ?? ''}_'
+      '${start?.position.longitude.toStringAsFixed(3) ?? ''}_'
+      '${finish?.position.latitude.toStringAsFixed(3) ?? ''}_'
+      '${finish?.position.longitude.toStringAsFixed(3) ?? ''}_${profile.detourKm}';
     try {
-      final found = await api.searchPoi(original!, profile);
+      List<Poi> found;
       String? aiWarning;
+      try {
+        found = await api.searchPoi(original!, profile);
+        if (found.isNotEmpty) {
+          await poiCache.save(cacheKey, found);
+        } else {
+          final cached = await poiCache.load(cacheKey);
+          if (cached.isNotEmpty) {
+            found = cached;
+            aiWarning = 'Новые места не найдены. Показана сохранённая подборка.';
+          }
+        }
+      } catch (lookupError) {
+        found = await poiCache.load(cacheKey);
+        if (found.isEmpty) rethrow;
+        aiWarning = 'Сеть поиска POI недоступна. Показаны ранее найденные места (кэш).';
+      }
       if (aiKeyController.text.trim().isNotEmpty && found.isNotEmpty) {
         try {
           if (mounted) setState(() => status = 'ИИ подбирает интересные места');
           await ai.personalize(places: found, profile: profile, apiKey: aiKeyController.text);
         } catch (exception) {
-          aiWarning = exception.toString();
+          aiWarning = [if (aiWarning != null) aiWarning, exception.toString()].join(' ');
         }
       }
       if (!mounted) return;
