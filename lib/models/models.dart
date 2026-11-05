@@ -107,3 +107,24 @@ double distanceFromStartKm(LatLng p, List<LatLng> route) {
   }
   return closestDistance;
 }
+
+/// Equally spaced positions along the WHOLE polyline, including the finish.
+/// Public API sampling is bounded; a production-quality corridor needs PostGIS.
+List<LatLng> routeSamples(List<LatLng> route, {int maxSamples = 12}) {
+  if (route.length <= 1 || maxSamples < 2) return route.take(1).toList();
+  const distance = Distance();
+  final totals = <double>[0];
+  for (var i = 1; i < route.length; i++) {
+    totals.add(totals.last + distance.as(LengthUnit.Kilometer, route[i - 1], route[i]));
+  }
+  if (totals.last == 0) return [route.first];
+  final result = <LatLng>[route.first];
+  var cursor = 1;
+  for (var index = 1; index < maxSamples - 1; index++) {
+    final target = totals.last * index / (maxSamples - 1);
+    while (cursor < totals.length - 1 && totals[cursor] < target) cursor++;
+    if (route[cursor] != result.last) result.add(route[cursor]);
+  }
+  if (route.last != result.last) result.add(route.last);
+  return result;
+}
