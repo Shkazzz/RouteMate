@@ -1,0 +1,1 @@
+Android native files are generated with flutter create . --platforms android by the workflow. The workflow adds android.permission.INTERNET to the AndroidManifest before building.

@@ -1,0 +1,1 @@
+Optional web platform: flutter create . --platforms web. The MVP is initially targeted at Android.
