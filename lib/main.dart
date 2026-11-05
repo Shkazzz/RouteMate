@@ -205,7 +205,6 @@ class _RouteMateHomeState extends State<RouteMateHome> {
       firstDate: today,
       lastDate: today.add(const Duration(days: 365)),
       helpText: 'Дата поездки',
-      locale: const Locale('ru'),
     );
     if (picked == null || !mounted) return;
     setState(() => tripDate = picked);
