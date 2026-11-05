@@ -13,11 +13,13 @@ void main() {
 
   test('real Wikipedia POI is returned when Overpass fails', () async {
     var wikipediaRequests = 0;
+    final requestedHosts = <String>[];
     final service = OsmServices(client: MockClient((request) async {
+      requestedHosts.add(request.url.host);
       if (request.url.host.contains('overpass')) {
         return http.Response('bad gateway', 502);
       }
-      if (request.url.host == 'ru.wikipedia.org') {
+      if (request.url.path == '/w/api.php') {
         wikipediaRequests++;
         expect(request.url.queryParameters['origin'], '*');
         return http.Response(jsonEncode({
@@ -33,7 +35,12 @@ void main() {
       distanceKm: 3,
       durationMinutes: 8,
     );
-    final found = await service.searchPoi(road, TripProfile(detourKm: 10));
+    final List<Poi> found;
+    try {
+      found = await service.searchPoi(road, TripProfile(detourKm: 10));
+    } catch (error) {
+      fail('Fallback failure. Hosts: $requestedHosts. $error');
+    }
     expect(found, hasLength(1));
     expect(found.first.name, 'Памятник у дороги');
     expect(wikipediaRequests, greaterThan(0));
