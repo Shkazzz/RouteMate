@@ -22,11 +22,11 @@ void main() {
       if (request.url.path == '/w/api.php') {
         wikipediaRequests++;
         expect(request.url.queryParameters['origin'], '*');
-        return http.Response(jsonEncode({
+        return http.Response.bytes(utf8.encode(jsonEncode({
           'query': { 'geosearch': [
             {'pageid': 12345, 'title': 'Памятник у дороги', 'lat': 55.75, 'lon': 37.6}
           ] }
-        }), 200);
+        })), 200);
       }
       return http.Response('not found', 404);
     }));
