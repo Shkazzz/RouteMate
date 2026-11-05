@@ -7,6 +7,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'models/models.dart';
 import 'services/osm_services.dart';
 import 'services/ai_recommendations.dart';
+import 'services/weather_service.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -36,11 +37,15 @@ class RouteMateHome extends StatefulWidget {
 class _RouteMateHomeState extends State<RouteMateHome> {
   final api = OsmServices();
   final ai = AiRecommendations();
+  final weatherService = WeatherService();
   final aiKeyController = TextEditingController();
   final mapController = MapController();
   final startController = TextEditingController(text: 'Москва');
   final finishController = TextEditingController(text: 'Тверь');
   TripProfile profile = TripProfile();
+  DateTime tripDate = WeatherService.day(DateTime.now());
+  Map<String, TripWeather> weatherByLocation = {};
+  String? weatherMessage;
   PlacePoint? start;
   PlacePoint? finish;
   RoadRoute? original;
@@ -62,6 +67,8 @@ class _RouteMateHomeState extends State<RouteMateHome> {
       final prefs = await SharedPreferences.getInstance();
       final value = prefs.getString('profile');
       if (value != null) profile = TripProfile.fromJson(jsonDecode(value) as Map<String, dynamic>);
+      final savedDate = prefs.getString('tripDate');
+      if (savedDate != null) tripDate = DateTime.tryParse(savedDate) ?? tripDate;
       startController.text = prefs.getString('start') ?? startController.text;
       finishController.text = prefs.getString('finish') ?? finishController.text;
       if (mounted) setState(() {});
@@ -71,6 +78,7 @@ class _RouteMateHomeState extends State<RouteMateHome> {
   Future<void> save() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('profile', jsonEncode(profile.toJson()));
+    await prefs.setString('tripDate', tripDate.toIso8601String().split('T').first);
     await prefs.setString('start', startController.text);
     await prefs.setString('finish', finishController.text);
   }
@@ -108,6 +116,8 @@ class _RouteMateHomeState extends State<RouteMateHome> {
       finish = null;
       original = null;
       current = null;
+      weatherByLocation = {};
+      weatherMessage = null;
     });
     try {
       final a = await api.geocode(startController.text);
@@ -128,6 +138,7 @@ class _RouteMateHomeState extends State<RouteMateHome> {
       fitRoute();
       await save();
       await findPlaces();
+      await loadWeather();
     } catch (exception) {
       fail(exception);
     } finally {
@@ -174,6 +185,7 @@ class _RouteMateHomeState extends State<RouteMateHome> {
       if (!mounted) return;
       setState(() => current = route);
       fitRoute();
+      await loadWeather();
     } catch (exception) {
       if (mounted) setState(() => poi.selected = old);
       fail(exception);
@@ -181,6 +193,90 @@ class _RouteMateHomeState extends State<RouteMateHome> {
       if (mounted) setState(() { busy = false; status = ''; });
     }
   }
+
+  String formatTripDate(DateTime day) => '${day.day.toString().padLeft(2, '0')}.'
+    '${day.month.toString().padLeft(2, '0')}.${day.year}';
+
+  Future<void> chooseTripDate() async {
+    final today = WeatherService.day(DateTime.now());
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: tripDate.isBefore(today) ? today : tripDate,
+      firstDate: today,
+      lastDate: today.add(const Duration(days: 365)),
+      helpText: 'Дата поездки',
+      locale: const Locale('ru'),
+    );
+    if (picked == null || !mounted) return;
+    setState(() => tripDate = picked);
+    await save();
+    await loadWeather();
+  }
+
+  Future<void> loadWeather() async {
+    if (!mounted) return;
+    if (!WeatherService.isForecastDate(tripDate)) {
+      setState(() {
+        weatherByLocation = {};
+        weatherMessage = 'Прогноз на ${formatTripDate(tripDate)} пока недоступен. '
+          'Open-Meteo прогнозирует максимум на 16 дней, включая сегодня.';
+      });
+      return;
+    }
+    final candidates = <PlacePoint>[
+      if (start != null) start!,
+      ...chosen.take(3).map((p) => PlacePoint(p.name, p.position)),
+      if (finish != null && finish!.name != start?.name) finish!,
+    ];
+    if (candidates.isEmpty) return;
+    final updated = <String, TripWeather>{};
+    var failures = 0;
+    // Weather must never block POI or route display.
+    for (final place in candidates) {
+      try {
+        updated[place.name] = await weatherService.fetch(
+          location: place.name, coordinates: place.position, date: tripDate);
+      } catch (_) {
+        failures++;
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      weatherByLocation = updated;
+      weatherMessage = failures == 0 ? null :
+        'Прогноз получен не для всех точек. Повторите запрос позднее.';
+    });
+  }
+
+  Widget weatherSection() => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      const SizedBox(height: 12),
+      Text('Погода на ${formatTripDate(tripDate)}',
+        style: Theme.of(context).textTheme.titleMedium),
+      if (weatherMessage != null)
+        Padding(padding: const EdgeInsets.symmetric(vertical: 8), child: Text(weatherMessage!)),
+      if (weatherByLocation.isEmpty && weatherMessage == null)
+        const Padding(padding: EdgeInsets.all(8), child: Text('Прогноз появится после построения маршрута.')),
+      ...weatherByLocation.values.map((forecast) => Card(
+        child: ListTile(
+          leading: Icon(forecast.weatherCode >= 61 ? Icons.umbrella_outlined :
+            forecast.weatherCode <= 3 ? Icons.wb_sunny_outlined : Icons.cloud_outlined),
+          title: Text(forecast.location),
+          subtitle: Text('${forecast.description}; осадки до ${forecast.precipitationProbability}% · '
+            'ветер до ${forecast.maxWindKmh.toStringAsFixed(0)} км/ч'),
+          trailing: Text('${forecast.minC.toStringAsFixed(0)}°…${forecast.maxC.toStringAsFixed(0)}°'),
+        ),
+      )),
+      if (weatherByLocation.isNotEmpty)
+        const Text('Источник: Open-Meteo. Прогноз ориентировочный для даты, '
+          'не учитывает точное время прибытия к остановке.',
+          style: TextStyle(fontSize: 11)),
+      TextButton.icon(
+        onPressed: (start == null || finish == null) ? null : loadWeather,
+        icon: const Icon(Icons.refresh), label: const Text('Обновить погоду')),
+    ],
+  );
 
   Future<void> exportTrip() async {
     if (start == null || finish == null) return;
@@ -197,6 +293,7 @@ class _RouteMateHomeState extends State<RouteMateHome> {
   void dispose() {
     api.dispose();
     ai.dispose();
+    weatherService.dispose();
     aiKeyController.dispose();
     mapController.dispose();
     startController.dispose();
@@ -254,6 +351,12 @@ class _RouteMateHomeState extends State<RouteMateHome> {
       TextField(controller: finishController,
         decoration: const InputDecoration(labelText: 'Куда', prefixIcon: Icon(Icons.flag_outlined), border: OutlineInputBorder())),
       const SizedBox(height: 12),
+      OutlinedButton.icon(
+        onPressed: chooseTripDate,
+        icon: const Icon(Icons.calendar_month),
+        label: Text('Дата поездки: ${formatTripDate(tripDate)}'),
+      ),
+      const SizedBox(height: 12),
       FilledButton.icon(
         onPressed: busy ? null : plan,
         icon: const Icon(Icons.auto_awesome),
@@ -264,6 +367,7 @@ class _RouteMateHomeState extends State<RouteMateHome> {
         Card(child: Padding(padding: const EdgeInsets.all(14), child:
           Text('Дорога: ${current!.distanceKm.toStringAsFixed(0)} км · ${(current!.durationMinutes / 60).toStringAsFixed(1)} ч'))),
       ],
+      weatherSection(),
       const SizedBox(height: 12),
       mapView(),
       const SizedBox(height: 4),
@@ -374,6 +478,7 @@ class _RouteMateHomeState extends State<RouteMateHome> {
       ListTile(leading: const Icon(Icons.flag), title: Text('Прибытие: ${finish?.name ?? ''}'),
         subtitle: Text('Примерно в ${clock(current!.durationMinutes + visitTime)}')),
       const Text('Время приблизительное: остановки и пробки могут изменить расчёт.'),
+      weatherSection(),
       FilledButton.icon(onPressed: exportTrip,
         icon: const Icon(Icons.open_in_new), label: const Text('Экспортировать маршрут')),
     ]);
