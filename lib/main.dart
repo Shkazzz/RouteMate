@@ -6,6 +6,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'models/models.dart';
 import 'services/osm_services.dart';
+import 'services/ai_recommendations.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -34,6 +35,8 @@ class RouteMateHome extends StatefulWidget {
 
 class _RouteMateHomeState extends State<RouteMateHome> {
   final api = OsmServices();
+  final ai = AiRecommendations();
+  final aiKeyController = TextEditingController();
   final mapController = MapController();
   final startController = TextEditingController(text: 'Москва');
   final finishController = TextEditingController(text: 'Тверь');
@@ -136,8 +139,17 @@ class _RouteMateHomeState extends State<RouteMateHome> {
     if (original == null) return;
     try {
       final found = await api.searchPoi(original!, profile);
+      String? aiWarning;
+      if (aiKeyController.text.trim().isNotEmpty && found.isNotEmpty) {
+        try {
+          if (mounted) setState(() => status = 'ИИ подбирает интересные места');
+          await ai.personalize(places: found, profile: profile, apiKey: aiKeyController.text);
+        } catch (exception) {
+          aiWarning = exception.toString();
+        }
+      }
       if (!mounted) return;
-      setState(() { places = found; error = null; page = 1; });
+      setState(() { places = found; error = aiWarning; page = 1; });
     } catch (exception) {
       fail(exception);
     }
@@ -184,6 +196,8 @@ class _RouteMateHomeState extends State<RouteMateHome> {
   @override
   void dispose() {
     api.dispose();
+    ai.dispose();
+    aiKeyController.dispose();
     mapController.dispose();
     startController.dispose();
     finishController.dispose();
@@ -308,7 +322,9 @@ class _RouteMateHomeState extends State<RouteMateHome> {
             children: [
               Text(poi.name, style: Theme.of(context).textTheme.titleMedium),
               Text('${poi.category} · ~${poi.distanceKm.toStringAsFixed(1)} км от линии · ${poi.visitMinutes} мин'),
-              Text('Соответствие интересам: ${poi.score} баллов'),
+              Text('Соответствие интересам: ${poi.aiScore ?? poi.score} баллов${poi.aiScore == null ? ' (правила)' : ' (ИИ)'}'),
+              if (poi.aiReason != null && poi.aiReason!.isNotEmpty)
+                Text('ИИ: ${poi.aiReason}'),
               Row(children: [
                 Expanded(child: FilledButton.tonal(
                   onPressed: busy ? null : () => selectPoi(poi),
@@ -397,6 +413,46 @@ class _RouteMateHomeState extends State<RouteMateHome> {
     Text('Час выезда: ${profile.departureHour}:00'),
     Slider(value: profile.departureHour.toDouble(), min: 0, max: 23, divisions: 23,
       onChanged: (value) => setState(() => profile.departureHour = value.round())),
+    const SizedBox(height: 18),
+    const Divider(),
+    Text('ИИ-рекомендации (бесплатный тариф Gemini)',
+      style: Theme.of(context).textTheme.titleMedium),
+    const Text('Необязательно. Введите собственный API-ключ Google AI Studio. '
+      'Ключ используется только в текущем сеансе и не сохраняется. '
+      'Без ключа подбор работает по правилам. Не используйте такой способ '
+      'хранения ключа для публичного коммерческого приложения.'),
+    const SizedBox(height: 10),
+    TextField(
+      controller: aiKeyController,
+      obscureText: true,
+      enableSuggestions: false,
+      autocorrect: false,
+      decoration: const InputDecoration(
+        border: OutlineInputBorder(),
+        labelText: 'Gemini API key',
+        prefixIcon: Icon(Icons.auto_awesome),
+      ),
+    ),
+    const SizedBox(height: 8),
+    if (places.isNotEmpty)
+      OutlinedButton.icon(
+        icon: const Icon(Icons.auto_awesome),
+        label: const Text('Обновить рекомендации с ИИ'),
+        onPressed: busy ? null : () async {
+          if (aiKeyController.text.trim().isEmpty) {
+            fail(ApiException('Введите API-ключ Gemini в профиле.'));
+            return;
+          }
+          setState(() { busy = true; status = 'ИИ оценивает найденные места'; error = null; });
+          try {
+            await ai.personalize(places: places, profile: profile, apiKey: aiKeyController.text);
+            if (mounted) setState(() { places.sort((a,b) =>
+              (b.aiScore ?? b.score).compareTo(a.aiScore ?? a.score)); page = 1; });
+          } catch (exception) { fail(exception); }
+          finally { if (mounted) setState(() { busy = false; status = ''; }); }
+        },
+      ),
+    const SizedBox(height: 12),
     FilledButton(onPressed: () async {
       await save();
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(
