@@ -53,6 +53,8 @@ class Poi {
   final double distanceKm;
   final int score;
   final int visitMinutes;
+  int? aiScore;
+  String? aiReason;
   bool selected;
   bool skipped;
   Poi({required this.id, required this.name, required this.position,
