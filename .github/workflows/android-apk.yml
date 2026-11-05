@@ -29,6 +29,11 @@ jobs:
           p.write_text(s)
           assert 'android.permission.INTERNET' in p.read_text()
           PY
+      - name: Remove Flutter template test if generated
+        run: |
+          if [ -f test/widget_test.dart ] && grep -q 'MyApp' test/widget_test.dart; then
+            rm test/widget_test.dart
+          fi
       - run: flutter pub get
       - run: flutter test
       - run: flutter build apk --debug
