@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math' as math;
 import 'package:http/http.dart' as http;
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:latlong2/latlong.dart';
@@ -84,22 +83,11 @@ class OsmServices {
   Future<List<Poi>> searchPoi(RoadRoute route, TripProfile profile) async {
     if (route.points.isEmpty) return [];
     // Cap Overpass work: a handful of geographically distributed points, not a giant query.
-    const distance = Distance();
-    final spacingKm = math.max(20.0, profile.detourKm.toDouble() * 2);
-    final samples = <LatLng>[route.points.first];
-    var accrued = 0.0;
-    for (var i = 1; i < route.points.length; i++) {
-      accrued += distance.as(LengthUnit.Kilometer, route.points[i - 1], route.points[i]);
-      if (accrued >= spacingKm && samples.length < 6) {
-        samples.add(route.points[i]);
-        accrued = 0;
-      }
-    }
-    if (samples.length < 6 && samples.last != route.points.last) samples.add(route.points.last);
+    final samples = routeSamples(route.points, maxSamples: 12);
     final radius = (profile.detourKm * 1000).clamp(1000, 12000);
     final collected = <Poi>[];
     final seen = <String>{};
-    final hosts = ['overpass.kumi.systems', 'overpass.nchc.org.tw', 'overpass-api.de'];
+    final hosts = ['overpass-api.de', 'overpass.kumi.systems'];
     var successfulBatches = 0;
     Object? lastError;
 
@@ -149,18 +137,25 @@ class OsmServices {
     // Wikipedia geosearch is an independent POI fallback, not an AI model.
     // It returns real geotagged articles even when public Overpass gives HTTP 502.
     if (collected.length < 12) {
-      for (final point in samples.take(6)) {
+      for (final point in samples) {
         try {
-          final data = await _request(Uri.https('ru.wikipedia.org', '/w/api.php', {
-            'action': 'query',
-            'list': 'geosearch',
-            'gscoord': '${point.latitude.toStringAsFixed(5)}|${point.longitude.toStringAsFixed(5)}',
-            'gsradius': (profile.detourKm * 1000).clamp(1000, 10000).toString(),
-            'gslimit': '20',
-            'format': 'json',
-            'origin': '*', // Required by MediaWiki for cross-origin browser fetch.
-          }), timeout: const Duration(seconds: 8));
-          final found = ((data as Map)['query'] as Map?)?['geosearch'] as List? ?? [];
+          List found = [];
+          // Try Russian and English Wikimedia endpoints; both provide real geotagged pages.
+          for (final wikiHost in ['ru.wikipedia.org', 'en.wikipedia.org']) {
+            try {
+              final data = await _request(Uri.https(wikiHost, '/w/api.php', {
+                'action': 'query',
+                'list': 'geosearch',
+                'gscoord': '${point.latitude.toStringAsFixed(5)}|${point.longitude.toStringAsFixed(5)}',
+                'gsradius': (profile.detourKm * 1000).clamp(1000, 10000).toString(),
+                'gslimit': '25',
+                'format': 'json',
+                'origin': '*',
+              }), timeout: const Duration(seconds: 8));
+              found = ((data as Map)['query'] as Map?)?['geosearch'] as List? ?? [];
+              if (found.isNotEmpty) break;
+            } catch (error) { lastError = error; }
+          }
           for (final entry in found) {
             if (entry is! Map || entry['lat'] is! num || entry['lon'] is! num) continue;
             final id = 'wiki/${entry['pageid']}';
