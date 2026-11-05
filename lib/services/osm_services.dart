@@ -86,12 +86,12 @@ class OsmServices {
     var accrued = 0.0;
     for (var i = 1; i < route.points.length; i++) {
       accrued += distance.as(LengthUnit.Kilometer, route.points[i - 1], route.points[i]);
-      if (accrued >= spacingKm && samples.length < 12) {
+      if (accrued >= spacingKm && samples.length < 6) {
         samples.add(route.points[i]);
         accrued = 0;
       }
     }
-    if (samples.length < 12 && samples.last != route.points.last) samples.add(route.points.last);
+    if (samples.length < 6 && samples.last != route.points.last) samples.add(route.points.last);
     final radius = (profile.detourKm * 1000).clamp(1000, 12000);
     final collected = <Poi>[];
     final seen = <String>{};
@@ -115,7 +115,7 @@ class OsmServices {
       for (final host in hosts) {
         try {
           data = await _request(Uri.https(host, '/api/interpreter'),
-            postBody: query, timeout: const Duration(seconds: 22));
+            postBody: query, timeout: const Duration(seconds: 8));
           if (data is Map && data['elements'] is List) break;
           data = null;
         } catch (error) { lastError = error; }
@@ -138,10 +138,44 @@ class OsmServices {
           distanceKm: km, score: scorePoi(tags, profile, km), visitMinutes: visitDuration(category)));
       }
     }
-    if (successfulBatches == 0) {
-      throw ApiException('Сервис поиска мест временно недоступен. Маршрут сохранён на экране. ${lastError ?? ''}');
+    // Wikipedia geosearch is an independent POI fallback, not an AI model.
+    // It returns real geotagged articles even when public Overpass gives HTTP 502.
+    if (collected.length < 12) {
+      for (final point in samples.take(6)) {
+        try {
+          final data = await _request(Uri.https('ru.wikipedia.org', '/w/api.php', {
+            'action': 'query',
+            'list': 'geosearch',
+            'gscoord': '${point.latitude.toStringAsFixed(5)}|${point.longitude.toStringAsFixed(5)}',
+            'gsradius': (profile.detourKm * 1000).clamp(1000, 10000).toString(),
+            'gslimit': '20',
+            'format': 'json',
+          }), timeout: const Duration(seconds: 8));
+          final found = ((data as Map)['query'] as Map?)?['geosearch'] as List? ?? [];
+          for (final entry in found) {
+            if (entry is! Map || entry['lat'] is! num || entry['lon'] is! num) continue;
+            final id = 'wiki/${entry['pageid']}';
+            if (seen.contains(id)) continue;
+            final position = LatLng((entry['lat'] as num).toDouble(), (entry['lon'] as num).toDouble());
+            final km = distanceToRouteKm(position, route.points);
+            if (km > profile.detourKm + 1) continue;
+            seen.add(id);
+            final name = (entry['title'] ?? '').toString();
+            if (name.isEmpty) continue;
+            collected.add(Poi(id: id, name: name, position: position,
+              category: 'История', distanceKm: km,
+              score: 30 + (profile.interests.contains('История') ? 100 : 0) - km.round() * 2,
+              visitMinutes: 60));
+          }
+        } catch (error) {
+          lastError = error;
+        }
+      }
     }
     collected.sort((a, b) => b.score.compareTo(a.score));
+    if (collected.isEmpty && successfulBatches == 0) {
+      throw ApiException('Сервисы поиска мест не ответили (Overpass и Wikipedia). Маршрут остаётся на карте. ${lastError ?? ''}');
+    }
     return collected.take(40).toList();
   }
 
